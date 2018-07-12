@@ -55,6 +55,8 @@ static sblist* auth_ips;
 static pthread_mutex_t auth_ips_mutex = PTHREAD_MUTEX_INITIALIZER;
 static const struct server* server;
 static int bind_mode;
+static int output_bind_mode;
+const  char *bindip = "127.0.0.1";
 
 enum socksstate {
 	SS_1_CONNECTED,
@@ -99,6 +101,26 @@ struct thread {
 #else
 static void dolog(const char* fmt, ...) { }
 #endif
+
+static int output_bind(int fd)
+{
+    struct sockaddr_in bindaddr;
+    memset(&bindaddr,0,sizeof(bindaddr));
+    bindaddr.sin_family = AF_INET;
+    bindaddr.sin_addr.s_addr = INADDR_ANY;
+    if (inet_pton(AF_INET, bindip, &bindaddr.sin_addr) <= 0)
+    {
+        printf("inet_pton error\n");
+    } 
+
+    if (bind(fd, (struct sockaddr *) &bindaddr, sizeof(bindaddr)) < 0)
+    {
+        printf("bind error\n");
+        return -1;
+    }
+
+    return 0;
+}
 
 static int connect_socks_target(unsigned char *buf, size_t n, struct client *client) {
 	if(n < 5) return -EC_GENERAL_FAILURE;
@@ -156,6 +178,8 @@ static int connect_socks_target(unsigned char *buf, size_t n, struct client *cli
 			return -EC_GENERAL_FAILURE;
 		}
 	}
+    if (output_bind_mode && output_bind(fd) == -1)
+        goto eval_errno;
 	if(bind_mode && server_bindtoip(server, fd) == -1)
 		goto eval_errno;
 	if(connect(fd, remote->ai_addr, remote->ai_addrlen) == -1)
@@ -373,13 +397,19 @@ int main(int argc, char** argv) {
 	int c;
 	const char *listenip = "0.0.0.0";
 	unsigned port = 1080;
-	while((c = getopt(argc, argv, ":1bi:p:u:P:")) != -1) {
+	while((c = getopt(argc, argv, ":1bBi:o:p:u:P:")) != -1) {
 		switch(c) {
 			case '1':
 				auth_ips = sblist_new(sizeof(union sockaddr_union), 8);
 				break;
 			case 'b':
 				bind_mode = 1;
+				break;
+			case 'B':
+				output_bind_mode = 1;
+				break;
+			case 'o':
+				bindip = optarg;
 				break;
 			case 'u':
 				auth_user = strdup(optarg);
