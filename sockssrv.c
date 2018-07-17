@@ -22,6 +22,7 @@
 */
 
 #define _GNU_SOURCE
+#include <sys/time.h>
 #include <unistd.h>
 #define _POSIX_C_SOURCE 200809L
 #include <stdlib.h>
@@ -48,6 +49,26 @@
 #undef PTHREAD_STACK_MIN
 #define PTHREAD_STACK_MIN 32*1024
 #endif
+
+int default_speed = 10;
+#define default_bucket_size 100 * 1024;
+typedef struct les_token_bucket_s les_token_bucket_t;
+struct les_token_bucket_s {
+    int speed;
+    ssize_t size;
+    ssize_t token;
+    struct timeval tv;
+};
+
+
+void les_token_bucket_init(les_token_bucket_t *bt)
+{
+    printf("\n>>>> token_bucket init >>>>\n");
+    bt->speed = default_speed;
+    bt->size  = default_bucket_size;
+    gettimeofday(&bt->tv, NULL);
+}
+
 
 static const char* auth_user;
 static const char* auth_pass;
@@ -256,7 +277,7 @@ static void send_error(int fd, enum errorcode ec) {
 	write(fd, buf, 10);
 }
 
-static void copyloop(int fd1, int fd2) {
+static void copyloop(int fd1, int fd2, les_token_bucket_t *tb) {
 	int maxfd = fd2;
 	if(fd1 > fd2) maxfd = fd1;
 	fd_set fdsc, fds;
@@ -282,8 +303,60 @@ static void copyloop(int fd1, int fd2) {
 		int infd = FD_ISSET(fd1, &fds) ? fd1 : fd2;
 		int outfd = infd == fd2 ? fd1 : fd2;
 		char buf[1024];
-		ssize_t sent = 0, n = read(infd, buf, sizeof buf);
-		if(n <= 0) return;
+        ssize_t n = 0;
+        if (infd == fd2)
+        {
+            struct timeval tv;
+            /*** 1. add token to bucket ***/
+            gettimeofday(&tv, NULL);
+/*
+            printf(">>>>>>>>>>");
+            printf("tv.tv_sec: %ld\n", tv.tv_sec);
+            printf("tb->tv.tv_sec: %ld\n", tb->tv.tv_sec);
+            printf("tv.tv_sec: %ld\n", tv.tv_usec);
+            printf("tb->tv.tv_usec: %ld\n", tb->tv.tv_usec);
+            printf("tv.tv_sec - tb->tv.tv_sec: %ld\n", tv.tv_sec - tb->tv.tv_sec);
+            printf("tv.tv_usec - tb->tv.tv_usec: %ld\n", tv.tv_usec - tb->tv.tv_usec);
+            printf("<<<<<<<<<<<<<<");
+*/
+
+            ssize_t token = ((tv.tv_sec - tb->tv.tv_sec ) * 1000 * 1000 + (tv.tv_usec - tb->tv.tv_usec)) * tb->speed;
+            //printf("token0:%ld\n", token);
+            token = token < 1000 ? 0 : (token / 1000);
+            //printf("tb->speed: %d", tb->speed);
+            //printf("token1:%ld\n", token);
+            if (token != 0)
+            {
+                tb->tv.tv_sec  = tv.tv_sec;
+                tb->tv.tv_usec = tv.tv_usec;
+            }
+
+            //token += bt->token;
+
+            tb->token = token > tb->size ? tb->size : token;
+
+            /*** 2. get token from bucket ***/
+            ssize_t readlen = 0;
+            readlen = tb->token > 1024 ? 1024 : tb->token;
+            //printf("readlen:%ld\n", readlen);
+            if (readlen == 0)
+            {
+                continue;
+            }
+         
+            /*** 3. read package ***/
+            n = 0;
+		    n = read(infd, buf, readlen);
+		    if(n <= 0) return;
+
+            tb->token -= n;
+        }
+        else
+        {
+		    n = read(infd, buf, sizeof buf);
+		    if(n <= 0) return;
+        }
+        ssize_t sent = 0;
 		while(sent < n) {
 			ssize_t m = write(outfd, buf+sent, n-sent);
 			if(m < 0) return;
@@ -308,6 +381,8 @@ static enum errorcode check_credentials(unsigned char* buf, size_t n) {
 }
 
 static void* clientthread(void *data) {
+    les_token_bucket_t tb;
+    les_token_bucket_init(&tb);
 	struct thread *t = data;
 	t->state = SS_1_CONNECTED;
 	unsigned char buf[1024];
@@ -340,7 +415,7 @@ static void* clientthread(void *data) {
 				}
 				remotefd = ret;
 				send_error(t->client.fd, EC_SUCCESS);
-				copyloop(t->client.fd, remotefd);
+				copyloop(t->client.fd, remotefd, &tb);
 				goto breakloop;
 
 		}
@@ -397,7 +472,7 @@ int main(int argc, char** argv) {
 	int c;
 	const char *listenip = "0.0.0.0";
 	unsigned port = 1080;
-	while((c = getopt(argc, argv, ":1bBi:o:p:u:P:")) != -1) {
+	while((c = getopt(argc, argv, ":1bBi:o:p:u:P:L:")) != -1) {
 		switch(c) {
 			case '1':
 				auth_ips = sblist_new(sizeof(union sockaddr_union), 8);
@@ -418,6 +493,9 @@ int main(int argc, char** argv) {
 			case 'P':
 				auth_pass = strdup(optarg);
 				zero_arg(optarg);
+				break;
+			case 'L':
+                default_speed = atoi(optarg);
 				break;
 			case 'i':
 				listenip = optarg;
